@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { supabase } from './supabase.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -82,48 +83,26 @@ const btnStyle = (variant = 'primary', size = 'md') => ({
   fontFamily: 'inherit',
 });
 
-// ─── Sample data ─────────────────────────────────────────────────────────────
+// ─── DB mappers ──────────────────────────────────────────────────────────────
 
-const INIT_OPPS = [
-  {
-    id: '1', clientName: 'Carlos Méndez', company: 'LogiCorp SA',
-    sector: 'Logística', product: 'ASRS', value: 280000,
-    stage: 'Propuesta enviada', createdAt: '2026-04-10',
-  },
-  {
-    id: '2', clientName: 'Ana Torres', company: 'FarmaPlus',
-    sector: 'Farmacéutica', product: 'VLM', value: 145000,
-    stage: 'Reunión agendada', createdAt: '2026-05-02',
-  },
-  {
-    id: '3', clientName: 'Roberto Vega', company: 'MineSolutions',
-    sector: 'Minería', product: 'AGV', value: 520000,
-    stage: 'Negociación', createdAt: '2026-03-15',
-  },
-];
-
-const INIT_ACTS = [
-  {
-    id: 'a1', opportunityId: '1', type: 'Reunión', date: '2026-04-12',
-    description: 'Presentación inicial del sistema ASRS al equipo de operaciones.',
-    nextStep: 'Enviar propuesta técnica', nextStepDate: '2026-04-20',
-  },
-  {
-    id: 'a2', opportunityId: '1', type: 'Propuesta', date: '2026-04-22',
-    description: 'Propuesta técnica y económica enviada por email.',
-    nextStep: 'Follow-up telefónico', nextStepDate: '2026-06-04',
-  },
-  {
-    id: 'a3', opportunityId: '2', type: 'Llamada', date: '2026-05-05',
-    description: 'Llamada de calificación. Alto interés en VLM para almacén regulado.',
-    nextStep: 'Agendar demo en planta', nextStepDate: '2026-06-02',
-  },
-  {
-    id: 'a4', opportunityId: '3', type: 'Demo', date: '2026-04-28',
-    description: 'Demo en sitio de AGVs en operación real. Muy buena recepción.',
-    nextStep: 'Negociar términos contractuales', nextStepDate: '2026-05-30',
-  },
-];
+const oppFromDB = r => ({
+  id: r.id, clientName: r.client_name, company: r.company,
+  sector: r.sector, product: r.product, value: r.value,
+  stage: r.stage, createdAt: r.created_at,
+});
+const oppToDB = o => ({
+  client_name: o.clientName, company: o.company, sector: o.sector,
+  product: o.product, value: o.value, stage: o.stage, created_at: o.createdAt,
+});
+const actFromDB = r => ({
+  id: r.id, opportunityId: r.opportunity_id, type: r.type,
+  date: r.date, description: r.description,
+  nextStep: r.next_step || '', nextStepDate: r.next_step_date || '',
+});
+const actToDB = a => ({
+  opportunity_id: a.opportunityId, type: a.type, date: a.date,
+  description: a.description, next_step: a.nextStep, next_step_date: a.nextStepDate,
+});
 
 // ─── Utils ───────────────────────────────────────────────────────────────────
 
@@ -866,23 +845,109 @@ const VIEWS = [
 ];
 
 export default function App() {
-  const [opps,    setOpps]    = useState(INIT_OPPS);
-  const [acts,    setActs]    = useState(INIT_ACTS);
+  const [opps,    setOpps]    = useState([]);
+  const [acts,    setActs]    = useState([]);
   const [view,    setView]    = useState('dashboard');
   const [selId,   setSelId]   = useState(null);
   const [newOpp,  setNewOpp]  = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState(null);
 
-  const addOpp      = o  => { setOpps(p => [...p, o]); setNewOpp(false); };
-  const editOpp     = o  => setOpps(p => p.map(x => x.id === o.id ? o : x));
-  const addAct      = a  => setActs(p => [...p, a]);
-  const changeStage = (id, s) => setOpps(p => p.map(o => o.id === id ? { ...o, stage: s } : o));
-  const deleteOpp    = id  => { setOpps(p => p.filter(o => o.id !== id)); setActs(p => p.filter(a => a.opportunityId !== id)); };
-  const deleteManyOpps = ids => { const s = new Set(ids); setOpps(p => p.filter(o => !s.has(o.id))); setActs(p => p.filter(a => !s.has(a.opportunityId))); };
+  // ── Initial load + real-time sync ──────────────────────────────────────────
+  useEffect(() => {
+    let mounted = true;
+
+    const load = async () => {
+      const [{ data: od, error: oe }, { data: ad, error: ae }] = await Promise.all([
+        supabase.from('opportunities').select('*').order('created_at', { ascending: false }),
+        supabase.from('activities').select('*').order('date', { ascending: false }),
+      ]);
+      if (!mounted) return;
+      if (oe || ae) { setError('Error conectando con Supabase'); setLoading(false); return; }
+      setOpps((od || []).map(oppFromDB));
+      setActs((ad || []).map(actFromDB));
+      setLoading(false);
+    };
+    load();
+
+    const channel = supabase.channel('crm-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'opportunities' }, ({ eventType, new: n, old: o }) => {
+        if (eventType === 'INSERT')
+          setOpps(p => p.some(x => x.id === n.id) ? p : [oppFromDB(n), ...p]);
+        else if (eventType === 'UPDATE')
+          setOpps(p => p.map(x => x.id === n.id ? oppFromDB(n) : x));
+        else if (eventType === 'DELETE')
+          setOpps(p => p.filter(x => x.id !== o.id));
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'activities' }, ({ eventType, new: n, old: o }) => {
+        if (eventType === 'INSERT')
+          setActs(p => p.some(x => x.id === n.id) ? p : [actFromDB(n), ...p]);
+        else if (eventType === 'UPDATE')
+          setActs(p => p.map(x => x.id === n.id ? actFromDB(n) : x));
+        else if (eventType === 'DELETE')
+          setActs(p => p.filter(x => x.id !== o.id));
+      })
+      .subscribe();
+
+    return () => { mounted = false; supabase.removeChannel(channel); };
+  }, []);
+
+  // ── Mutations ──────────────────────────────────────────────────────────────
+  const addOpp = useCallback(async o => {
+    const { data } = await supabase.from('opportunities').insert(oppToDB(o)).select().single();
+    if (data) setOpps(p => p.some(x => x.id === data.id) ? p : [oppFromDB(data), ...p]);
+    setNewOpp(false);
+  }, []);
+
+  const editOpp = useCallback(async o => {
+    await supabase.from('opportunities').update(oppToDB(o)).eq('id', o.id);
+    setOpps(p => p.map(x => x.id === o.id ? o : x));
+  }, []);
+
+  const addAct = useCallback(async a => {
+    const { data } = await supabase.from('activities').insert(actToDB(a)).select().single();
+    if (data) setActs(p => p.some(x => x.id === data.id) ? p : [actFromDB(data), ...p]);
+  }, []);
+
+  const changeStage = useCallback(async (id, stage) => {
+    await supabase.from('opportunities').update({ stage }).eq('id', id);
+    setOpps(p => p.map(o => o.id === id ? { ...o, stage } : o));
+  }, []);
+
+  const deleteOpp = useCallback(async id => {
+    await supabase.from('opportunities').delete().eq('id', id);
+    setOpps(p => p.filter(o => o.id !== id));
+    setActs(p => p.filter(a => a.opportunityId !== id));
+  }, []);
+
+  const deleteManyOpps = useCallback(async ids => {
+    const s = new Set(ids);
+    await supabase.from('opportunities').delete().in('id', ids);
+    setOpps(p => p.filter(o => !s.has(o.id)));
+    setActs(p => p.filter(a => !s.has(a.opportunityId)));
+  }, []);
 
   const selectOpp = o => { setSelId(o.id); setView('detail'); };
   const curOpp    = selId ? opps.find(o => o.id === selId) : null;
+  const navTo     = v => { setView(v); setSelId(null); };
 
-  const navTo = v => { setView(v); setSelId(null); };
+  if (loading) return (
+    <div style={{ minHeight: '100vh', background: c.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 12 }}>
+      <div style={{ width: 32, height: 32, border: `3px solid ${c.border2}`, borderTopColor: c.accent, borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+      <span style={{ color: c.textSec, fontSize: 13 }}>Conectando con Supabase...</span>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
+
+  if (error) return (
+    <div style={{ minHeight: '100vh', background: c.bg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: c.surface, border: `1px solid ${c.danger}44`, borderRadius: 8, padding: 24, maxWidth: 360, textAlign: 'center' }}>
+        <div style={{ color: c.danger, fontWeight: 600, marginBottom: 8 }}>Error de conexión</div>
+        <div style={{ color: c.textSec, fontSize: 13, marginBottom: 16 }}>{error}</div>
+        <button style={btnStyle('primary', 'sm')} onClick={() => window.location.reload()}>Reintentar</button>
+      </div>
+    </div>
+  );
 
   return (
     <div style={{ minHeight: '100vh', background: c.bg, color: c.text, fontFamily: '"Inter", system-ui, -apple-system, sans-serif' }}>
