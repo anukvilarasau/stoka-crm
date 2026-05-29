@@ -526,13 +526,15 @@ function Kanban({ opps, onSelect, onStageChange, onNew }) {
 
 // ─── List View ────────────────────────────────────────────────────────────────
 
-function ListView({ opps, acts, onSelect, onNew }) {
+function ListView({ opps, acts, onSelect, onNew, onDeleteMany }) {
   const [fSector,  setFSector]  = useState('');
   const [fProduct, setFProduct] = useState('');
   const [fStage,   setFStage]   = useState('');
   const [search,   setSearch]   = useState('');
   const [sortKey,  setSortKey]  = useState('createdAt');
   const [sortDir,  setSortDir]  = useState(-1);
+  const [selected, setSelected] = useState(new Set());
+  const [confirmDel, setConfirmDel] = useState(false);
 
   const filtered = useMemo(() => {
     let list = [...opps];
@@ -552,6 +554,33 @@ function ListView({ opps, acts, onSelect, onNew }) {
     });
     return list;
   }, [opps, fSector, fProduct, fStage, search, sortKey, sortDir]);
+
+  const allFilteredIds = filtered.map(o => o.id);
+  const allSelected = allFilteredIds.length > 0 && allFilteredIds.every(id => selected.has(id));
+  const someSelected = allFilteredIds.some(id => selected.has(id));
+
+  const toggleOne = (e, id) => {
+    e.stopPropagation();
+    setSelected(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (allSelected) allFilteredIds.forEach(id => next.delete(id));
+      else allFilteredIds.forEach(id => next.add(id));
+      return next;
+    });
+  };
+
+  const handleDeleteSelected = () => {
+    onDeleteMany([...selected]);
+    setSelected(new Set());
+    setConfirmDel(false);
+  };
 
   const toggleSort = k => () => {
     if (sortKey === k) setSortDir(d => -d);
@@ -591,10 +620,43 @@ function ListView({ opps, acts, onSelect, onNew }) {
         <span style={{ fontSize: 11, color: c.textDim }}>{filtered.length} resultado{filtered.length !== 1 ? 's' : ''}</span>
       </div>
 
+      {/* Delete bar */}
+      {someSelected && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: c.danger + '18', border: `1px solid ${c.danger}44`,
+          borderRadius: 7, padding: '8px 14px', marginBottom: 10,
+        }}>
+          <span style={{ fontSize: 13, color: c.text, flex: 1 }}>
+            <span style={{ fontWeight: 700, color: c.danger }}>{selected.size}</span>
+            {' '}oportunidad{selected.size !== 1 ? 'es' : ''} seleccionada{selected.size !== 1 ? 's' : ''}
+          </span>
+          {confirmDel ? (
+            <>
+              <span style={{ fontSize: 12, color: c.textSec }}>¿Confirmar?</span>
+              <button style={btnStyle('ghost', 'sm')} onClick={() => setConfirmDel(false)}>Cancelar</button>
+              <button style={btnStyle('danger', 'sm')} onClick={handleDeleteSelected}>Eliminar</button>
+            </>
+          ) : (
+            <>
+              <button style={btnStyle('ghost', 'sm')} onClick={() => setSelected(new Set())}>Deseleccionar</button>
+              <button style={{ ...btnStyle('danger', 'sm') }} onClick={() => setConfirmDel(true)}>
+                Eliminar seleccionadas
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       <div style={{ background: c.surface, border: `1px solid ${c.border}`, borderRadius: 8, overflow: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${c.border}` }}>
+              <th style={{ padding: '6px 12px', width: 36 }}>
+                <input type="checkbox" checked={allSelected} ref={el => { if (el) el.indeterminate = someSelected && !allSelected; }}
+                  onChange={toggleAll}
+                  style={{ cursor: 'pointer', accentColor: c.accent, width: 14, height: 14 }} />
+              </th>
               <TH label="Empresa" k="company" />
               <TH label="Contacto" k="clientName" />
               <TH label="Sector" k="sector" />
@@ -608,9 +670,18 @@ function ListView({ opps, acts, onSelect, onNew }) {
           <tbody>
             {filtered.map(o => {
               const actCount = acts.filter(a => a.opportunityId === o.id).length;
+              const isSelected = selected.has(o.id);
               return (
-                <tr key={o.id} style={{ borderTop: `1px solid ${c.border}`, cursor: 'pointer' }}
+                <tr key={o.id}
+                  style={{
+                    borderTop: `1px solid ${c.border}`, cursor: 'pointer',
+                    background: isSelected ? c.danger + '0d' : 'transparent',
+                  }}
                   onClick={() => onSelect(o)}>
+                  <td style={{ padding: '9px 12px' }} onClick={e => toggleOne(e, o.id)}>
+                    <input type="checkbox" checked={isSelected} onChange={() => {}}
+                      style={{ cursor: 'pointer', accentColor: c.danger, width: 14, height: 14 }} />
+                  </td>
                   <td style={{ padding: '9px 12px', fontWeight: 700, color: c.text }}>{o.company}</td>
                   <td style={{ padding: '9px 12px', color: c.textSec }}>{o.clientName}</td>
                   <td style={{ padding: '9px 12px', color: c.textSec }}>{o.sector}</td>
@@ -805,7 +876,8 @@ export default function App() {
   const editOpp     = o  => setOpps(p => p.map(x => x.id === o.id ? o : x));
   const addAct      = a  => setActs(p => [...p, a]);
   const changeStage = (id, s) => setOpps(p => p.map(o => o.id === id ? { ...o, stage: s } : o));
-  const deleteOpp   = id => { setOpps(p => p.filter(o => o.id !== id)); setActs(p => p.filter(a => a.opportunityId !== id)); };
+  const deleteOpp    = id  => { setOpps(p => p.filter(o => o.id !== id)); setActs(p => p.filter(a => a.opportunityId !== id)); };
+  const deleteManyOpps = ids => { const s = new Set(ids); setOpps(p => p.filter(o => !s.has(o.id))); setActs(p => p.filter(a => !s.has(a.opportunityId))); };
 
   const selectOpp = o => { setSelId(o.id); setView('detail'); };
   const curOpp    = selId ? opps.find(o => o.id === selId) : null;
@@ -882,7 +954,7 @@ export default function App() {
       ) : view === 'kanban' ? (
         <Kanban opps={opps} onSelect={selectOpp} onStageChange={changeStage} onNew={() => setNewOpp(true)} />
       ) : view === 'list' ? (
-        <ListView opps={opps} acts={acts} onSelect={selectOpp} onNew={() => setNewOpp(true)} />
+        <ListView opps={opps} acts={acts} onSelect={selectOpp} onNew={() => setNewOpp(true)} onDeleteMany={deleteManyOpps} />
       ) : (
         <Dashboard opps={opps} acts={acts} onSelect={selectOpp} />
       )}
